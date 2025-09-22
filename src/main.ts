@@ -25,10 +25,12 @@ if (import.meta.env.MODE === 'development' && username && password) {
 const KEY = import.meta.env.VITE_KEY;
 export { KEY };
 
-const user = await churchtoolsClient.get<Person>(`/whoami`);
-
+const mainUser = await churchtoolsClient.get<Person>(`/whoami`);
+const users = await churchtoolsClient.get<Person[]>(`/persons`, {});
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <div style="display: flex; place-content: center; place-items: center; height: 100vh;">
-    <h1>Welcome ${[user.firstName, user.lastName].join(' ')}</h1>
+    <h1>Welcome ${[mainUser.firstName, mainUser.lastName].join(' ')}</h1>
   </div>
 `;
+
+
