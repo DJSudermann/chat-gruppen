@@ -1,4 +1,4 @@
-import type { Person } from './utils/ct-types';
+import type {Group, GroupMember, MemberPreview, Person} from './utils/ct-types';
 import { churchtoolsClient } from '@churchtools/churchtools-client';
 
 // only import reset.css in development mode to keep the production bundle small and to simulate CT environment
@@ -25,19 +25,22 @@ if (import.meta.env.MODE === 'development' && username && password) {
 const KEY = import.meta.env.VITE_KEY;
 export { KEY };
 
-// Umbau: nutzt /groups/members als Basis + /groups/{groupId} zur Namensauflösung
-// Features:
-// - Suche nach Vor-/Nachname
-// - Suche nach **Gruppennamen** (aus /groups/{id})
-// - Checkboxen wählen direkt aus; unten Live-Auswahl mit Entfernen
-// - Export-Button gibt ID + Namen aus
-// - IDs überall als String
-// - Debug-Logs enthalten
+// Personen-Auswahl + Gruppensuche & -auswahl
+// + Bereich „Gruppe konfigurieren“ (Typ, Name, Chat aktiv?)
+// - Checkbox = direkt ausgewählt; unten Live-Auswahl (entfernbar)
+// - Export-Button schreibt Konfiguration + ID/Name ins Textfeld
+// - Eingeloggter User automatisch vorausgewählt
+// - Keine Debug-Logs
 
 interface Person {
   id: string;
   firstName: string;
   lastName: string;
+}
+
+interface GroupItem {
+  id: string; // String für Konsistenz
+  name: string;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -61,25 +64,8 @@ function debounce<T extends (...args: any[]) => void>(fn: T, wait = 250) {
 function norm(s: string) {
   return (s || "")
     .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
+    .replace(/\p{M}/gu, "") // Diakritika entfernen
     .toLowerCase();
-}
-
-// ---- Normalizer für API-Antworten ----
-function normalizePersons(res: any): Person[] {
-  const arr = Array.isArray(res) ? res : res?.data ?? [];
-  return arr.map((p: any) => ({
-    id: String(p.id ?? p.personId ?? p.domainIdentifier ?? ""),
-    firstName: String(p.firstName ?? p?.domainAttributes?.firstName ?? ""),
-    lastName: String(p.lastName ?? p?.domainAttributes?.lastName ?? ""),
-  }));
-}
-
-function extractGroupName(res: any): string | null {
-  // /groups/{id} kann je nach Version { name } oder { data: { name } } oder { title } liefern
-  const src = res?.data ?? res;
-  const name = src?.name ?? src?.title ?? src?.information?.name ?? null;
-  return name ? String(name) : null;
 }
 
 (async function main() {
@@ -92,65 +78,84 @@ function extractGroupName(res: any): string | null {
   };
 
   const usersRaw = await churchtoolsClient.get<any>(`/persons`, {});
-  const users: Person[] = normalizePersons(usersRaw);
+  const usersArray: any[] = Array.isArray(usersRaw) ? usersRaw : (usersRaw?.data ?? []);
+  const users: Person[] = usersArray.map((p) => ({
+    id: String(p.id),
+    firstName: p.firstName,
+    lastName: p.lastName,
+  }));
   const usersById = new Map<string, Person>(users.map((p) => [p.id, p]));
 
-  // Alle Mitgliedschaften (leichtgewichtiger, stabiler) – liefert personId + groupId
-  const membershipsRes = await churchtoolsClient.get<any>(`/groups/members`, {});
-  const memberships: Array<{ personId: number; groupId: number; groupMemberStatus?: string; deleted?: boolean }> =
-    (membershipsRes?.data ?? []) as any[];
-
-  // Map: groupId → Set(personId)
-  const groupToPersons = new Map<string, Set<string>>();
-  for (const m of memberships) {
-    if (m.deleted) continue;
-    if (m.groupMemberStatus && m.groupMemberStatus !== "active") continue;
-    const gid = String(m.groupId);
-    const pid = String(m.personId);
-    if (!groupToPersons.has(gid)) groupToPersons.set(gid, new Set());
-    groupToPersons.get(gid)!.add(pid);
-  }
-
-  console.log("/groups/members parsed:", groupToPersons);
-
-  // Cache für Gruppen-Namen
-  const groupNameCache = new Map<string, string>();
-  async function fetchGroupName(groupId: string): Promise<string | null> {
-    if (groupNameCache.has(groupId)) return groupNameCache.get(groupId)!;
-    try {
-      const res = await churchtoolsClient.get<any>(`/groups/${groupId}`, {});
-      const name = extractGroupName(res);
-      if (name) groupNameCache.set(groupId, name);
-      console.log(`Group ${groupId} name →`, name);
-      return name;
-    } catch (e) {
-      console.warn(`Fehler beim Laden von /groups/${groupId}`, e);
-      return null;
-    }
-  }
-
-  // Optionales Prefetching: lade Namen aller bekannten Gruppen einmalig
-  await Promise.all([...groupToPersons.keys()].map((gid) => fetchGroupName(gid)));
+  const groupsRaw = await churchtoolsClient.get<any>(`/groups`, {});
+  const groupsArr: any[] = Array.isArray(groupsRaw) ? groupsRaw : (groupsRaw?.data ?? []);
+  const groups: GroupItem[] = groupsArr
+    .map((g) => ({ id: String(g.id ?? g.groupId ?? g.domainIdentifier), name: String(g.name ?? g.title ?? "") }))
+    .filter((g) => g.id && g.name);
 
   // ---- UI ----
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = "";
 
   const container = el("div");
-  container.setAttribute("style", "max-width: 700px; margin: 40px auto; font-family: sans-serif;");
+  container.setAttribute("style", "max-width: 760px; margin: 40px auto; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;");
 
-  const header = el("h1", { text: `Welcome ${mainUser.firstName} ${mainUser.lastName}` });
-  header.setAttribute("style", "font-size: 20px; margin-bottom: 16px;");
+  const header = el("h1", { text: `Hallo ${mainUser.firstName} ${mainUser.lastName}` });
+  header.setAttribute("style", "font-size: 22px; margin-bottom: 16px;");
 
   const searchInput = el("input") as HTMLInputElement;
   searchInput.placeholder = "Nach Vor-, Nachname oder Gruppenname suchen…";
-  searchInput.setAttribute("style", "width:100%; padding:8px; margin-bottom:10px;");
+  searchInput.setAttribute("style", "width:100%; padding:10px 12px; margin-bottom:12px; border:1px solid #d1d5db; border-radius:8px;");
 
   const results = el("div");
-  results.setAttribute("style", "display:grid; gap:6px; margin-bottom:20px;");
+  results.setAttribute("style", "display:grid; gap:8px; margin-bottom:20px;");
 
   const selectionList = el("div");
-  selectionList.setAttribute("style", "margin-bottom:20px; display:grid; gap:6px;");
+  selectionList.setAttribute("style", "margin-bottom:16px; display:grid; gap:6px;");
+
+  // --- Gruppe konfigurieren ---
+  const configCard = el("div");
+  configCard.setAttribute("style", "border:1px solid #e5e7eb; border-radius:12px; padding:12px; margin-bottom:12px; background:#fafafa;");
+
+  const cfgTitle = el("h2", { text: "Gruppe konfigurieren" });
+  cfgTitle.setAttribute("style", "font-size:16px; margin:0 0 10px 0;");
+
+  const cfgGrid = el("div");
+  cfgGrid.setAttribute("style", "display:grid; grid-template-columns: 1fr; gap:10px;");
+
+  // Typ (Select)
+  const typeWrap = el("label");
+  typeWrap.setAttribute("style", "display:grid; gap:6px;");
+  const typeSpan = el("span", { text: "Gruppentyp" });
+  const groupTypeSelect = el("select") as HTMLSelectElement;
+  groupTypeSelect.setAttribute("style", "padding:8px 10px; border:1px solid #d1d5db; border-radius:8px; background:#fff;");
+  const typeOptions = ["Bitte wählen…", "Dienst", "Kleingruppe", "Team", "Sonstiges"];
+  typeOptions.forEach((txt, i) => {
+    const opt = document.createElement("option");
+    opt.value = i === 0 ? "" : txt;
+    opt.textContent = txt;
+    groupTypeSelect.append(opt);
+  });
+  typeWrap.append(typeSpan, groupTypeSelect);
+
+  // Name (Input)
+  const nameWrap = el("label");
+  nameWrap.setAttribute("style", "display:grid; gap:6px;");
+  const nameSpan = el("span", { text: "Gruppenname" });
+  const groupNameInput = el("input") as HTMLInputElement;
+  groupNameInput.placeholder = "z. B. Gottesdienste";
+  groupNameInput.setAttribute("style", "padding:8px 10px; border:1px solid #d1d5db; border-radius:8px;");
+  nameWrap.append(nameSpan, groupNameInput);
+
+  // Chat aktiv? (Checkbox)
+  const chatWrap = el("label");
+  chatWrap.setAttribute("style", "display:flex; align-items:center; gap:8px; user-select:none;");
+  const chatCheckbox = document.createElement("input");
+  chatCheckbox.type = "checkbox";
+  const chatSpan = el("span", { text: "Chat direkt aktivieren" });
+  chatWrap.append(chatCheckbox, chatSpan);
+
+  cfgGrid.append(typeWrap, nameWrap, chatWrap);
+  configCard.append(cfgTitle, cfgGrid);
 
   const exportBtn = el("button", { text: "IDs & Namen in Textfeld ausgeben" });
   exportBtn.setAttribute(
@@ -160,7 +165,7 @@ function extractGroupName(res: any): string | null {
       "background:#2563eb",
       "color:white",
       "border:none",
-      "border-radius:6px",
+      "border-radius:8px",
       "cursor:pointer",
       "margin-bottom:10px",
       "box-shadow: 0 1px 2px rgba(0,0,0,.05)",
@@ -171,46 +176,89 @@ function extractGroupName(res: any): string | null {
 
   const outputArea = document.createElement("textarea");
   outputArea.readOnly = true;
-  outputArea.setAttribute("style", "width:100%; min-height:120px;");
+  outputArea.setAttribute("style", "width:100%; min-height:160px; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:13px;");
 
-  container.append(header, searchInput, results, selectionList, exportBtn, outputArea);
+  // Reihenfolge: Auswahl → Konfiguration → Button → Ausgabe
+  container.append(header, searchInput, results, selectionList, configCard, exportBtn, outputArea);
   app.append(container);
 
   // ---- State ----
   const selected = new Map<string, Person>();
   selected.set(mainUser.id, mainUser); // eingeloggter User vorselektiert
 
+  type PersonRow = { person: Person; groups: string[] };
+  type GroupRow = { group: GroupItem; members: Person[] };
+  let lastRendered: { groups: GroupRow[]; persons: PersonRow[] } = { groups: [], persons: [] };
+
   // ---- Render ----
-  function renderSearch(list: { person: Person; groups: string[] }[]) {
+  function toggleGroupSelection(members: Person[], checked: boolean) {
+    if (checked) {
+      members.forEach((m) => selected.set(m.id, m));
+    } else {
+      members.forEach((m) => selected.delete(m.id));
+    }
+    renderSelection();
+    renderSearch(lastRendered.groups, lastRendered.persons);
+  }
+
+  function renderSearch(groupRows: GroupRow[], personRows: PersonRow[]) {
+    lastRendered = { groups: groupRows, persons: personRows };
     results.innerHTML = "";
-    if (!list.length) {
+
+    if (!groupRows.length && !personRows.length) {
       const empty = el("div", { text: "Keine Treffer." });
       empty.setAttribute("style", "padding:8px; color:#6b7280; border:1px dashed #e5e7eb; border-radius:6px;");
       results.append(empty);
       return;
     }
 
-    list.forEach(({ person, groups }) => {
+    // Gruppen-Zeilen (anklickbar für Sammelauswahl)
+    groupRows.forEach(({ group, members }) => {
       const row = el("label");
-      row.setAttribute("style", "display:flex; gap:8px; align-items:center; border:1px solid #eee; padding:6px; border-radius:6px;");
+      row.setAttribute(
+        "style",
+        [
+          "display:flex",
+          "gap:8px",
+          "align-items:center",
+          "border:1px solid #dbe1ea",
+          "padding:8px",
+          "border-radius:8px",
+          "background:#f8fafc",
+        ].join(";")
+      );
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = members.length > 0 && members.every((m) => selected.has(m.id));
+      cb.addEventListener("change", () => toggleGroupSelection(members, cb.checked));
+
+      const label = el("span", { text: `Gruppe: ${group.name} (${members.length} Mitglieder)` });
+      label.setAttribute("style", "font-weight:600;");
+
+      row.append(cb, label);
+      results.append(row);
+    });
+
+    // Personen-Zeilen
+    personRows.forEach(({ person, groups }) => {
+      const row = el("label");
+      row.setAttribute("style", "display:flex; gap:8px; align-items:center; border:1px solid #eee; padding:6px; border-radius:8px;");
 
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.checked = selected.has(person.id);
       cb.addEventListener("change", () => {
-        if (cb.checked) {
-          selected.set(person.id, person);
-        } else {
-          selected.delete(person.id);
-        }
+        if (cb.checked) selected.set(person.id, person); else selected.delete(person.id);
         renderSelection();
+        renderSearch(lastRendered.groups, lastRendered.persons);
       });
 
       let labelText = `${person.firstName} ${person.lastName} (ID: ${person.id}`;
       if (groups.length) labelText += `, Gruppe: ${groups.join(", ")}`;
       labelText += ")";
-
       const label = el("span", { text: labelText });
+
       row.append(cb, label);
       results.append(row);
     });
@@ -233,6 +281,7 @@ function extractGroupName(res: any): string | null {
       removeBtn.addEventListener("click", () => {
         selected.delete(p.id);
         renderSelection();
+        renderSearch(lastRendered.groups, lastRendered.persons);
       });
 
       row.append(span, removeBtn);
@@ -246,41 +295,45 @@ function extractGroupName(res: any): string | null {
     const q = norm(qRaw);
     if (!q) {
       results.innerHTML = "";
+      lastRendered = { groups: [], persons: [] };
       return;
     }
 
-    // Personentreffer (lokal)
+    // 1) Personentreffer (lokal)
     const personMatches = users.filter((u) => norm(u.firstName).includes(q) || norm(u.lastName).includes(q));
-    const enrichedPersons = personMatches.map((p) => ({ person: p, groups: [] }));
+    const personRows: PersonRow[] = personMatches.map((p) => ({ person: p, groups: [] }));
 
-    // Gruppennamen filtern (aus Cache, ggf. leerer Name übersprungen)
-    const groupHits: Array<{ id: string; name: string }> = [];
-    for (const gid of groupToPersons.keys()) {
-      const name = groupNameCache.get(gid) ?? (await fetchGroupName(gid)) ?? "";
-      if (!name) continue;
-      if (norm(name).includes(q)) groupHits.push({ id: gid, name });
-    }
-    console.log("Group hits for query:", qRaw, groupHits);
+    // 2) Gruppentreffer (anzeigen + Mitglieder selektierbar)
+    const matchingGroups = groups.filter((g) => norm(g.name).includes(q));
 
-    // Mitglieder dieser Gruppen auflösen
-    const groupMatches: { person: Person; groups: string[] }[] = [];
-    for (const { id: gid, name } of groupHits) {
-      const pids = [...(groupToPersons.get(gid) ?? new Set<string>())];
-      for (const pid of pids) {
-        const person = usersById.get(pid);
-        if (!person) continue; // Falls /persons nicht alle Personen enthält
-        const existing = groupMatches.find((gm) => gm.person.id === pid);
+    const groupRows: GroupRow[] = [];
+    const fromGroups: PersonRow[] = [];
+
+    for (const g of matchingGroups) {
+      const res = await churchtoolsClient.get<any>(`/groups/${g.id}/members`, {});
+      const members = Array.isArray(res) ? res : (res?.data ?? []);
+      const memberPersons: Person[] = members.map((m: any) => ({
+        id: String(m?.person?.domainIdentifier ?? m?.personId ?? m?.id),
+        firstName: String(m?.person?.domainAttributes?.firstName ?? ""),
+        lastName: String(m?.person?.domainAttributes?.lastName ?? ""),
+      }));
+      groupRows.push({ group: g, members: memberPersons });
+
+      // Personen aus Gruppen ebenfalls in den Treffer-Pool aufnehmen
+      for (const mp of memberPersons) {
+        const person = usersById.get(mp.id) ?? mp; // falls /persons unvollständig
+        const existing = fromGroups.find((x) => x.person.id === person.id);
         if (existing) {
-          if (!existing.groups.includes(name)) existing.groups.push(name);
+          if (!existing.groups.includes(g.name)) existing.groups.push(g.name);
         } else {
-          groupMatches.push({ person, groups: [name] });
+          fromGroups.push({ person, groups: [g.name] });
         }
       }
     }
 
-    // Zusammenführen & Deduplizieren
-    const combined: Record<string, { person: Person; groups: string[] }> = {};
-    for (const e of [...enrichedPersons, ...groupMatches]) {
+    // 3) Zusammenführen & Deduplizieren der Personenzeilen
+    const combined: Record<string, PersonRow> = {};
+    for (const e of [...personRows, ...fromGroups]) {
       const id = e.person.id;
       if (!combined[id]) {
         combined[id] = { person: e.person, groups: [...new Set(e.groups)] };
@@ -289,16 +342,21 @@ function extractGroupName(res: any): string | null {
       }
     }
 
-    const resultList = Object.values(combined);
-    console.log("Search results (combined):", resultList);
-    renderSearch(resultList);
+    renderSearch(groupRows, Object.values(combined));
   }, 350);
 
   searchInput.addEventListener("input", runSearch);
 
+  // ---- Export ----
   exportBtn.addEventListener("click", () => {
-    const lines = [...selected.values()].map((p) => `${p.id}\t${p.firstName} ${p.lastName}`);
-    outputArea.value = lines.join("\n");
+    const cfgLines = [
+      "[Gruppen-Konfiguration]",
+      `Typ: ${groupTypeSelect.value || '-'}`,
+      `Name: ${groupNameInput.value || '-'}`,
+      `Chat aktiv: ${chatCheckbox.checked ? 'Ja' : 'Nein'}`,
+    ];
+    const personLines = [...selected.values()].map((p) => `${p.id}\t${p.firstName} ${p.lastName}`);
+    outputArea.value = cfgLines.join("\n") + "\n\n" + personLines.join("\n");
   });
 
   // Initiale Auswahl anzeigen
