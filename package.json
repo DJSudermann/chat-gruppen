@@ -1,11 +1,12 @@
 {
-    "name": "extension-boilerplate",
-    "private": true,
-    "version": "0.0.1",
+    "name": "chat-gruppen",
+    "private": false,
+    "version": "0.0.05",
     "type": "module",
     "scripts": {
         "dev": "vite",
         "build": "tsc && vite build",
+        "zip": "node scripts/zip.mjs",
         "preview": "vite preview",
         "deploy": "npm run build && node scripts/package.js"
     },
@@ -14,5 +15,9 @@
         "@types/node": "^24.3.0",
         "typescript": "^5.9.2",
         "vite": "^7.1.2"
+    },
+    "dependencies": {
+        "zip": "^1.2.0",
+        "bestzip": "^2.2.1"
     }
 }

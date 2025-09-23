@@ -80,9 +80,12 @@ npm run preview
 
 To build and package your extension for deployment:
 
+
 ```bash
 npm run deploy
+npm zip
 ```
+
 
 This command will:
 
