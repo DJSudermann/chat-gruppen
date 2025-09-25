@@ -473,19 +473,104 @@ const runSearch = debounce(async () => {
 searchInput.addEventListener('input', runSearch);
 
 // Export
-exportBtn.addEventListener('click', () => {
-  const typeLabel = groupTypeSelect.options[groupTypeSelect.selectedIndex]?.text || '-';
-  const typeValue = groupTypeSelect.value || '';
+// Helfer (nur einmal definieren)
+function pretty(obj: unknown) {
+  try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+}
+function toPlainError(e: any) {
+  return {
+    name: e?.name ?? 'Error',
+    message: e?.message ?? String(e),
+    status: e?.status ?? e?.response?.status ?? e?.code,
+    responseBody: e?.body ?? e?.response?.data ?? e?.response?.body ?? e?.data ?? undefined,
+  };
+}
 
-  const cfgLines = [
-    '[Gruppen-Konfiguration]',
-    `Typ: ${typeLabel}${typeValue ? ` (ID: ${typeValue})` : ''}`,
-    `Name: ${groupNameInput.value || '-'}`,
-    `Chat aktiv: ${chatCheckbox.checked ? 'Ja' : 'Nein'}`,
-  ];
-  const personLines = [...selected.values()].map((p) => `${p.id}    ${p.firstName} ${p.lastName}`);
-  outputArea.value = cfgLines.join('\n') + '\n\n' + personLines.join('\n');
+exportBtn.addEventListener('click', async () => {
+  const typeLabel = groupTypeSelect.options[groupTypeSelect.selectedIndex]?.text || '-';
+  const groupTypeId = Number(groupTypeSelect.value || '') || 0;
+  const name = (groupNameInput.value || '').trim();
+
+  // 👉 Rolle des Hauptnutzers aus dem Select verwenden
+  const roleIdStr = mainUserRoleGeneratorSelect.value || '';
+  const roleId = Number(roleIdStr);
+
+  exportBtn.disabled = true;
+
+  const log: string[] = [];
+  const push = (title: string, data?: unknown) =>
+    log.push(data === undefined ? title : `${title}\n${pretty(data)}`);
+
+  try {
+    if (!name) throw new Error('Bitte einen Gruppennamen eingeben.');
+    if (!groupTypeId) throw new Error('Bitte einen Gruppentyp auswählen.');
+    if (!Number.isFinite(roleId) || roleId <= 0)
+      throw new Error('Bitte eine gültige Rolle für dich auswählen.');
+
+    // 1) Gruppe erstellen – mit der gewählten roleId
+    const groupPayload = {
+      campusId: 0,
+      force: true,
+      groupCategoryId: 0,
+      groupStatusId: 1,
+      groupTypeId,
+      name,
+      parentGroupId: 0,
+      roleId,                     // <- vom Select
+      visibility: 'hidden' as const,
+    };
+
+    push('REQUEST: POST /groups – Payload:', groupPayload);
+    const createdGroup = await churchtoolsClient.post<Group>('/groups', groupPayload);
+    push('RESPONSE: POST /groups – Body:', createdGroup);
+
+    // 2) Tag "Chat Gruppe" setzen
+    const tagPayload = { name: 'Chat Gruppe' };
+    const tagPath = `/tags/group/${createdGroup.id}`;
+    push(`REQUEST: POST ${tagPath} – Payload:`, tagPayload);
+
+    try {
+      const tagResp = await churchtoolsClient.post(tagPath, tagPayload);
+      push(`RESPONSE: POST ${tagPath} – Body:`, tagResp);
+    } catch (e: any) {
+      const pe = toPlainError(e);
+      if (pe.status === 409) {
+        // Tag existiert schon – nicht kritisch
+        push(`INFO: POST ${tagPath} – Tag existiert bereits (409).`, pe);
+      } else {
+        push(`ERROR: POST ${tagPath}`, pe);
+        throw e;
+      }
+    }
+
+    // 3) Zusammenfassung
+    push('Zusammenfassung:', {
+      typeLabel,
+      groupTypeId,
+      usedRoleId: roleId,
+      createdGroupId: createdGroup.id,
+      createdGroupName: createdGroup.name,
+      tagApplied: 'Chat Gruppe',
+      chatAktivAnzeige: chatCheckbox.checked ? 'Ja' : 'Nein',
+      ausgewaehlteMitglieder: [...selected.values()].map(p => ({
+        id: p.id,
+        firstName: p.firstName ?? '',
+        lastName: p.lastName ?? '',
+      })),
+    });
+
+    outputArea.value = log.join('\n\n');
+  } catch (err) {
+    const pe = toPlainError(err);
+    push('❌ FEHLER:', pe);
+    outputArea.value = log.join('\n\n');
+  } finally {
+    exportBtn.disabled = false;
+  }
 });
+
+
+
 
 // Initiale Auswahl anzeigen
 renderSelection();
