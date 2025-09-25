@@ -129,6 +129,7 @@ function norm(s: string) {
       const opt = document.createElement('option');
       const opt2 = document.createElement('option');  
       opt.value = role.id.toString();
+      opt2.value = role.id.toString();  // gleiche Rolle für
       opt2
       opt.textContent = role.name;
       opt2.textContent = role.name;
@@ -473,104 +474,93 @@ const runSearch = debounce(async () => {
 searchInput.addEventListener('input', runSearch);
 
 // Export
-// Helfer (nur einmal definieren)
-function pretty(obj: unknown) {
-  try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
-}
-function toPlainError(e: any) {
-  return {
-    name: e?.name ?? 'Error',
-    message: e?.message ?? String(e),
-    status: e?.status ?? e?.response?.status ?? e?.code,
-    responseBody: e?.body ?? e?.response?.data ?? e?.response?.body ?? e?.data ?? undefined,
-  };
-}
-
 exportBtn.addEventListener('click', async () => {
-  const typeLabel = groupTypeSelect.options[groupTypeSelect.selectedIndex]?.text || '-';
+  
   const groupTypeId = Number(groupTypeSelect.value || '') || 0;
-  const name = (groupNameInput.value || '').trim();
+  const name        = (groupNameInput.value || '').trim();
 
-  // 👉 Rolle des Hauptnutzers aus dem Select verwenden
-  const roleIdStr = mainUserRoleGeneratorSelect.value || '';
-  const roleId = Number(roleIdStr);
+  const mainUserRoleId    = Number(mainUserRoleGeneratorSelect.value || '');
+  const otherUsersRoleId  = Number(otherUserRoleGeneratorSelect.value || '');
 
   exportBtn.disabled = true;
 
-  const log: string[] = [];
-  const push = (title: string, data?: unknown) =>
-    log.push(data === undefined ? title : `${title}\n${pretty(data)}`);
+  // kleine Helfer
+  const pickFrontendUrl = (g: any): string | undefined =>
+    g?.frontendUrl || g?._links?.frontend?.href || g?._links?.self?.href;
+
+  const pickErrorText = (e: any) =>
+    e?.response?.data?.translatedMessage ||
+    e?.response?.data?.message ||
+    e?.message ||
+    'Unbekannter Fehler';
 
   try {
     if (!name) throw new Error('Bitte einen Gruppennamen eingeben.');
     if (!groupTypeId) throw new Error('Bitte einen Gruppentyp auswählen.');
-    if (!Number.isFinite(roleId) || roleId <= 0)
-      throw new Error('Bitte eine gültige Rolle für dich auswählen.');
+    if (!Number.isFinite(mainUserRoleId)   || mainUserRoleId   <= 0) throw new Error('Bitte eine gültige Rolle für dich auswählen.');
+    if (!Number.isFinite(otherUsersRoleId) || otherUsersRoleId <= 0) throw new Error('Bitte eine gültige Rolle für die anderen auswählen.');
 
-    // 1) Gruppe erstellen – mit der gewählten roleId
+    // 1) Gruppe erstellen
     const groupPayload = {
       campusId: 0,
       force: true,
-      groupCategoryId: 0,
-      groupStatusId: 1,
       groupTypeId,
       name,
       parentGroupId: 0,
-      roleId,                     // <- vom Select
+      roleId: mainUserRoleId,
+      groupStatusId: 1,             // wichtig: als Zahl senden
       visibility: 'hidden' as const,
     };
-
-    push('REQUEST: POST /groups – Payload:', groupPayload);
     const createdGroup = await churchtoolsClient.post<Group>('/groups', groupPayload);
-    push('RESPONSE: POST /groups – Body:', createdGroup);
 
-    // 2) Tag "Chat Gruppe" setzen
-    const tagPayload = { name: 'Chat Gruppe' };
-    const tagPath = `/tags/group/${createdGroup.id}`;
-    push(`REQUEST: POST ${tagPath} – Payload:`, tagPayload);
+    // 2) Tag setzen (Fehler hier ignorieren, damit die UX sauber bleibt)
+    try { await churchtoolsClient.post(`/tags/group/${createdGroup.id}`, { name: 'Chat Gruppe' }); } catch {}
 
-    try {
-      const tagResp = await churchtoolsClient.post(tagPath, tagPayload);
-      push(`RESPONSE: POST ${tagPath} – Body:`, tagResp);
-    } catch (e: any) {
-      const pe = toPlainError(e);
-      if (pe.status === 409) {
-        // Tag existiert schon – nicht kritisch
-        push(`INFO: POST ${tagPath} – Tag existiert bereits (409).`, pe);
-      } else {
-        push(`ERROR: POST ${tagPath}`, pe);
-        throw e;
+    // 3) Andere Mitglieder hinzufügen
+    const otherMembers = [...selected.values()].filter(p => p.id !== mainUser.id);
+    const addResults = await Promise.all(otherMembers.map(async (p) => {
+      try {
+        await churchtoolsClient.put(
+          `/groups/${createdGroup.id}/members/${p.id}`,
+          { groupTypeRoleId: otherUsersRoleId, groupMemberStatus: 'active' }
+        );
+        return { ok: true, id: p.id };
+      } catch (e: any) {
+        // 409 = bereits Mitglied -> nicht als "hinzugefügt" zählen
+        const status = e?.status ?? e?.response?.status;
+        return { ok: status === 409, already: status === 409, id: p.id };
       }
+    }));
+    const addedCount = addResults.filter(r => r.ok && !r.already).length;
+
+    // 4) Chat optional starten
+    let chatActivated = false;
+    if (chatCheckbox.checked) {
+      try {
+        await churchtoolsClient.post(`/groups/${createdGroup.id}/chat`, {
+          enabled: true,
+          triggerChatInviteMail: true,
+        });
+        chatActivated = true;
+      } catch { chatActivated = false; }
     }
 
-    // 3) Zusammenfassung
-    push('Zusammenfassung:', {
-      typeLabel,
-      groupTypeId,
-      usedRoleId: roleId,
-      createdGroupId: createdGroup.id,
-      createdGroupName: createdGroup.name,
-      tagApplied: 'Chat Gruppe',
-      chatAktivAnzeige: chatCheckbox.checked ? 'Ja' : 'Nein',
-      ausgewaehlteMitglieder: [...selected.values()].map(p => ({
-        id: p.id,
-        firstName: p.firstName ?? '',
-        lastName: p.lastName ?? '',
-      })),
-    });
+    // 5) Nutzerfreundliche Zusammenfassung
+    const frontUrl = pickFrontendUrl(createdGroup) ?? `${window.location.origin}/groups/${createdGroup.id}`;
+    const parts = [
+      `Gruppe "${createdGroup.name}" wurde erstellt`,
+      `${addedCount} ${addedCount === 1 ? 'Person' : 'Personen'} hinzugefügt`,
+      chatCheckbox.checked ? (chatActivated ? 'und der Chat aktiviert' : '— Chat konnte nicht aktiviert werden') : ''
+    ].filter(Boolean);
 
-    outputArea.value = log.join('\n\n');
-  } catch (err) {
-    const pe = toPlainError(err);
-    push('❌ FEHLER:', pe);
-    outputArea.value = log.join('\n\n');
+    outputArea.value = `${parts.join(', ')}. Du findest deine Gruppe hier: ${frontUrl}`;
+
+  } catch (err: any) {
+    outputArea.value = `❌ ${pickErrorText(err)}`;
   } finally {
     exportBtn.disabled = false;
   }
 });
-
-
-
 
 // Initiale Auswahl anzeigen
 renderSelection();
