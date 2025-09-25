@@ -1,6 +1,6 @@
 // Beginn des Skripts – Überarbeitung mit offiziellen Typen & getAllPages
 import { churchtoolsClient } from '@churchtools/churchtools-client';
-import type { Person as CtPerson, Group as CtGroup, GroupMember as CtGroupMember, GroupType as CtGroupType } from './utils/ct-types';
+import type { Person, Group, GroupMember, GroupType, Role } from './utils/ct-types';
 import pkg from '../package.json' assert { type: 'json' };
 
 // only import reset.css in development mode to keep the production bundle small and to simulate CT environment
@@ -29,22 +29,8 @@ export { KEY };
 
 const VERSION: string = (pkg as any)?.version ?? '0.0.0';
 
-// --- Leichte UI-Typen ---
-type DisplayPerson = {
-  id: string;
-  firstName: string;
-  lastName: string;
-};
 
-interface GroupItem {
-  id: string;
-  name: string;
-}
 
-interface GroupTypeItem {
-  id: string;
-  name: string;
-}
 
 // --- Mini-Utils ---
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -69,60 +55,26 @@ function norm(s: string) {
   return (s || '').toLowerCase();
 }
 
-// Fallback-sicherer Fetch über alle Seiten: nutzt churchtoolsClient.getAllPages, 
-// fällt bei fehlender Meta/Pagination automatisch auf manuelle Paginierung zurück.
-async function fetchAll<T = any>(url: string, params: Record<string, any> = {}): Promise<T[]> {
-  try {
-    const res: any = await (churchtoolsClient as any).getAllPages(url, params);
-    if (Array.isArray(res)) return res as T[];
-    if (Array.isArray(res?.data)) return res.data as T[];
-  } catch (_) {
-    // Fallback unten
-  }
-  const out: T[] = [];
-  let page = 1;
-  for (let i = 0; i < 100; i++) {
-    const r: any = await churchtoolsClient.get<any>(url, { ...params, page });
-    const arr: T[] = Array.isArray(r) ? r : (Array.isArray(r?.data) ? r.data : []);
-    out.push(...arr);
-    const current = r?.meta?.pagination?.current;
-    const last = r?.meta?.pagination?.lastPage;
-    if (!current || !last || current >= last || arr.length === 0) break;
-    page++;
-  }
-  return out;
-}
+
 
 // --- Hauptlogik ---
 (async function main() {
   // 1) whoami
-  const who = await churchtoolsClient.get<CtPerson>('/whoami');
-  const mainUser: DisplayPerson = {
-    id: String(who.id),
-    firstName: String(who.firstName ?? ''),
-    lastName: String(who.lastName ?? ''),
-  };
+  const mainUser = await churchtoolsClient.get<Person>('/whoami');
+ 
 
   // 2) Personen **vollständig** laden (offizielle Typen + getAllPages)
-  const personsAll = await fetchAll<CtPerson>('/persons');
-  const persons: DisplayPerson[] = personsAll.map((p) => ({
-    id: String(p.id),
-    firstName: String((p as any).firstName ?? ''),
-    lastName: String((p as any).lastName ?? ''),
-  }));
-  const personsById = new Map<string, DisplayPerson>(persons.map((p) => [p.id, p]));
+  const persons = await churchtoolsClient.getAllPages('/persons')as Person[];
+  const personsById = new Map<number, Person>(persons.map((p) => [p.id, p]));
 
-  // 3) Gruppen & Gruppentypen laden (ebenfalls via getAllPages)
-  const groupsAll = await fetchAll<CtGroup>('/groups');
-  const groups: GroupItem[] = groupsAll
-    .map((g: CtGroup) => ({ id: String(g.id), name: String(g.name) }))
-    .filter((g) => g.id && g.name);
+  // 3) Gruppen  laden (ebenfalls via getAllPages)
+  const groups = await churchtoolsClient.getAllPages('/groups') as Group[];
 
-  const groupTypesAll = await fetchAll<CtGroupType>('/group/grouptypes');
-  const groupTypes: GroupTypeItem[] = groupTypesAll
-    .map((gt: CtGroupType) => ({ id: String(gt.id), name: String(gt.name) }))
-    .filter((gt) => gt.id && gt.name);
+  // Gruppentypen und deren Rollen - sind nicht paginiert
+  const groupTypes = await churchtoolsClient.get<GroupType[]>('/group/grouptypes');
 
+  const groupRoles = await churchtoolsClient.get<Role[]>('/group/roles');
+  
   // --- UI ---
   const app = document.querySelector<HTMLDivElement>('#app')!;
   app.innerHTML = '';
@@ -153,23 +105,60 @@ async function fetchAll<T = any>(url: string, params: Record<string, any> = {}):
   const cfgGrid = el('div');
   cfgGrid.setAttribute('style', 'display:grid; grid-template-columns: 1fr; gap:10px;');
 
+  // Gruppentyp auswahl
   const typeWrap = el('label');
   typeWrap.setAttribute('style', 'display:grid; gap:6px;');
   const typeSpan = el('span', { text: 'Gruppentyp' });
   const groupTypeSelect = el('select') as HTMLSelectElement;
   groupTypeSelect.setAttribute('style', 'padding:8px 10px; border:1px solid #d1d5db; border-radius:8px; background:#fff;');
-  const placeholderOpt = document.createElement('option');
-  placeholderOpt.value = '';
-  placeholderOpt.textContent = 'Bitte wählen…';
-  groupTypeSelect.append(placeholderOpt);
   for (const gt of groupTypes) {
     const opt = document.createElement('option');
-    opt.value = gt.id;
+    opt.value = gt.id.toString();
     opt.textContent = gt.name;
     groupTypeSelect.append(opt);
   }
   typeWrap.append(typeSpan, groupTypeSelect);
 
+  
+  function updateRolesForSelectedType() {
+    const selectedTypeId = Number(groupTypeSelect.value);
+    const rolesForType = groupRoles.filter(r => r.groupTypeId === selectedTypeId);
+    mainUserRoleGeneratorSelect.innerHTML = '';
+    otherUserRoleGeneratorSelect.innerHTML = '';
+    for (const role of rolesForType) {
+      const opt = document.createElement('option');
+      const opt2 = document.createElement('option');  
+      opt.value = role.id.toString();
+      opt2
+      opt.textContent = role.name;
+      opt2.textContent = role.name;
+      mainUserRoleGeneratorSelect.append(opt);
+      otherUserRoleGeneratorSelect.append(opt2)
+    }
+    mainUserRoleGeneratorSelect.selectedIndex=1;
+  }
+
+  // Rolle des Hauptnutzers in der Gruppe
+  const mainUserRoleGeneratornWrap = el('label');
+  mainUserRoleGeneratornWrap.setAttribute('style', 'display:grid; gap:6px;');
+  const mainUserRoleGeneratorSpan = el('span', { text: 'Welche Rolle wirst du haben?' });
+  const mainUserRoleGeneratorSelect = el('select') as HTMLSelectElement;  
+  mainUserRoleGeneratorSelect.setAttribute('style', 'padding:8px 10px; border:1px solid #d1d5db; border-radius:8px; background:#fff;');
+  mainUserRoleGeneratornWrap.append(mainUserRoleGeneratorSpan, mainUserRoleGeneratorSelect);
+
+  // Rolle der anderen Nutzer in der Gruppe
+  const otherUserRoleGeneratornWrap = el('label');
+  otherUserRoleGeneratornWrap.setAttribute('style', 'display:grid; gap:6px;');
+  const otherUserRoleGeneratorSpan = el('span', { text: 'Welche Rolle werden die anderen haben?' });
+  const otherUserRoleGeneratorSelect = el('select') as HTMLSelectElement;  
+  otherUserRoleGeneratorSelect.setAttribute('style', 'padding:8px 10px; border:1px solid #d1d5db; border-radius:8px; background:#fff;');
+  otherUserRoleGeneratornWrap.append(otherUserRoleGeneratorSpan, otherUserRoleGeneratorSelect);
+
+  // Initiale Rollen laden
+  updateRolesForSelectedType();
+  groupTypeSelect.addEventListener('change', updateRolesForSelectedType);
+  
+  // Gruppenname
   const nameWrap = el('label');
   nameWrap.setAttribute('style', 'display:grid; gap:6px;');
   const nameSpan = el('span', { text: 'Gruppenname' });
@@ -178,6 +167,7 @@ async function fetchAll<T = any>(url: string, params: Record<string, any> = {}):
   groupNameInput.setAttribute('style', 'padding:8px 10px; border:1px solid #d1d5db; border-radius:8px;');
   nameWrap.append(nameSpan, groupNameInput);
 
+  // Chat direkt aktivieren
   const chatWrap = el('label');
   chatWrap.setAttribute('style', 'display:flex; align-items:center; gap:8px; user-select:none;');
   const chatCheckbox = document.createElement('input');
@@ -185,7 +175,7 @@ async function fetchAll<T = any>(url: string, params: Record<string, any> = {}):
   const chatSpan = el('span', { text: 'Chat direkt aktivieren' });
   chatWrap.append(chatCheckbox, chatSpan);
 
-  cfgGrid.append(typeWrap, nameWrap, chatWrap);
+  cfgGrid.append(typeWrap, mainUserRoleGeneratornWrap, otherUserRoleGeneratornWrap  , nameWrap, chatWrap);
   configCard.append(cfgTitle, cfgGrid);
 
   const exportBtn = el('button', { text: 'IDs & Namen in Textfeld ausgeben' });
@@ -213,72 +203,138 @@ async function fetchAll<T = any>(url: string, params: Record<string, any> = {}):
   app.append(container);
 
   // --- State ---
-  const selected = new Map<string, DisplayPerson>();
+  const selected = new Map<number, Person>();
   selected.set(mainUser.id, mainUser);
 
-  type PersonRow = { person: DisplayPerson; groups: string[] };
-  type GroupRow = { group: GroupItem; members: DisplayPerson[] };
-  let lastRendered: { groups: GroupRow[]; persons: PersonRow[] } = { groups: [], persons: [] };
+  type PersonRow = { person: Person; groups: Group[] };
+  type GroupRow = { group: Group; members: Person[] };
 
   // Cache für Gruppenmitglieder
-  const groupMembersCache = new Map<string, DisplayPerson[]>();
-  async function fetchGroupMembers(groupId: string): Promise<DisplayPerson[]> {
-    if (groupMembersCache.has(groupId)) return groupMembersCache.get(groupId)!;
-    const all = await fetchAll<CtGroupMember>(`/groups/${groupId}/members`);
-    const mapped: DisplayPerson[] = all.map((m: CtGroupMember) => {
-      const pid = String((m as any).personId ?? (m as any)?.person?.domainIdentifier ?? '');
-      if (!pid) return null;
-      const fallback = personsById.get(pid);
-      const firstName = String((m as any)?.person?.domainAttributes?.firstName ?? fallback?.firstName ?? '');
-      const lastName  = String((m as any)?.person?.domainAttributes?.lastName  ?? fallback?.lastName  ?? '');
-      return { id: pid, firstName, lastName };
-    }).filter((p): p is DisplayPerson => !!p);
-    groupMembersCache.set(groupId, mapped);
-    return mapped;
+  const groupMembersCache = new Map<number, Person[]>();
+
+async function fetchGroupMembers(groupId: number): Promise<Person[]> {
+  const cached = groupMembersCache.get(groupId);
+  if (cached) return cached;
+  console.log(`Lade Mitglieder für Gruppe ${groupId}…`);
+  const members = await churchtoolsClient.getAllPages<GroupMember>(
+    `/groups/${groupId}/members`
+  );
+
+  const seen = new Set<number>();
+  const result: Person[] = [];
+
+  for (const m of members) {
+    // domainIdentifier ist ein String der numerischen Person.id
+    const di = m.person?.domainIdentifier;
+    const numIdFromDi = di ? Number(di) : undefined;
+
+    const id =
+      Number.isFinite(numIdFromDi) ? (numIdFromDi as number)
+      : typeof m.personId === "number" ? m.personId
+      : undefined;
+
+    if (id == null || seen.has(id)) continue;
+
+    const person = personsById.get(id);
+    if (person) {
+      result.push(person);
+      seen.add(id);
+    } 
   }
 
-  function renderSelection() {
-    selectionList.innerHTML = '';
-    if (!selected.size) {
-      selectionList.textContent = 'Noch keine Auswahl.';
-      return;
-    }
-    [...selected.values()].forEach((p) => {
-      const row = el('div');
-      row.setAttribute('style', 'display:flex; justify-content:space-between; align-items:center; border:1px solid #ddd; border-radius:6px; padding:6px;');
-      const span = el('span', { text: `${p.firstName} ${p.lastName} (ID: ${p.id})` });
-      const removeBtn = el('button', { text: 'Entfernen' });
-      removeBtn.setAttribute('style', 'padding:4px 8px; background:#ef4444; color:white; border:none; border-radius:4px; cursor:pointer;');
-      removeBtn.addEventListener('click', () => {
-        selected.delete(p.id);
-        renderSelection();
-        renderSearch(lastRendered.groups, lastRendered.persons);
-      });
-      row.append(span, removeBtn);
-      selectionList.append(row);
+  groupMembersCache.set(groupId, result);
+  return result;
+}
+
+
+
+function renderSelection() {
+  selectionList.innerHTML = '';
+  if (!selected.size) {
+    selectionList.textContent = 'Noch keine Auswahl.';
+    return;
+  }
+  [...selected.values()].forEach((p) => {
+    const row = el('div');
+    row.setAttribute('style', 'display:flex; justify-content:space-between; align-items:center; border:1px solid #ddd; border-radius:6px; padding:6px;');
+    const span = el('span', { text: `${p.firstName} ${p.lastName} (ID: ${p.id})` });
+    const removeBtn = el('button', { text: 'Entfernen' });
+    removeBtn.setAttribute('style', 'padding:4px 8px; background:#ef4444; color:white; border:none; border-radius:4px; cursor:pointer;');
+    removeBtn.addEventListener('click', () => {
+      selected.delete(p.id);
+      renderSelection();
+      renderSearch(lastRenderedItems);
     });
+    row.append(span, removeBtn);
+    selectionList.append(row);
+  });
+}
+
+function toggleGroupSelection(members: Person[], checked: boolean) {
+  if (checked) members.forEach((m) => selected.set(m.id, m));
+  else members.forEach((m) => selected.delete(m.id));
+  renderSelection();
+  renderSearch(lastRenderedItems);
+}
+
+type SearchItem =
+  | { kind: 'group';  score: number; row: GroupRow }
+  | { kind: 'person'; score: number; row: PersonRow };
+
+// "Besserer" Treffer = höherer Score
+function scoreText(text: string | undefined | null, q: string): number {
+  const t = norm(text ?? '');
+  if (!q || !t) return 0;
+  if (t === q) return 1000;                           // exakter Match
+  if (t.startsWith(q)) return 800 + Math.max(0, 50 - (t.length - q.length)); // Prefix + leichte Längenpräferenz
+  const words = t.split(/\s+/);
+  if (words.some(w => w.startsWith(q))) return 700;   // Wortanfang
+  const idx = t.indexOf(q);
+  if (idx >= 0) return 400 - idx;                     // irgendwo enthalten, früher ist besser
+  return 0;
+}
+
+function scorePerson(person: Person, groups: Group[], q: string, matchedGroupIds: Set<number>): number {
+  const nameScores = [
+    scoreText(person.firstName, q),
+    scoreText(person.lastName, q),
+    scoreText(`${person.firstName ?? ''} ${person.lastName ?? ''}`.trim(), q),
+    scoreText(`${person.lastName ?? ''} ${person.firstName ?? ''}`.trim(), q),
+  ];
+  const base = Math.max(...nameScores);
+
+  // Falls Name nicht passt, aber Person in passender Gruppe ist → kleiner Boost
+  const boost = Math.max(
+    0,
+    ...groups
+      .filter(gr => matchedGroupIds.has(gr.id))
+      .map(gr => scoreText(gr.name, q) * 0.6) // 60% des Gruppenscores
+  );
+
+  return Math.max(base, boost);
+}
+
+
+function renderSearch(items: SearchItem[]) {
+  // Scrollbarer Container
+  results.style.maxHeight = '60vh';
+  results.style.overflowY = 'auto';
+  results.style.display = 'flex';
+  results.style.flexDirection = 'column';
+  results.style.gap = '8px';
+  results.innerHTML = '';
+
+  if (!items.length) {
+    const empty = el('div', { text: 'Keine Treffer.' });
+    empty.setAttribute('style', 'padding:8px; color:#6b7280; border:1px dashed #e5e7eb; border-radius:6px;');
+    results.append(empty);
+    return;
   }
 
-  function toggleGroupSelection(members: DisplayPerson[], checked: boolean) {
-    if (checked) members.forEach((m) => selected.set(m.id, m));
-    else members.forEach((m) => selected.delete(m.id));
-    renderSelection();
-    renderSearch(lastRendered.groups, lastRendered.persons);
-  }
+  for (const item of items) {
+    if (item.kind === 'group') {
+      const { group, members } = item.row;
 
-  function renderSearch(groupRows: GroupRow[], personRows: PersonRow[]) {
-    lastRendered = { groups: groupRows, persons: personRows };
-    results.innerHTML = '';
-
-    if (!groupRows.length && !personRows.length) {
-      const empty = el('div', { text: 'Keine Treffer.' });
-      empty.setAttribute('style', 'padding:8px; color:#6b7280; border:1px dashed #e5e7eb; border-radius:6px;');
-      results.append(empty);
-      return;
-    }
-
-    // Gruppen-Zeilen
-    groupRows.forEach(({ group, members }) => {
       const row = el('label');
       row.setAttribute('style', [
         'display:flex', 'gap:8px', 'align-items:center',
@@ -295,10 +351,9 @@ async function fetchAll<T = any>(url: string, params: Record<string, any> = {}):
 
       row.append(cb, label);
       results.append(row);
-    });
+    } else {
+      const { person, groups } = item.row;
 
-    // Personen-Zeilen
-    personRows.forEach(({ person, groups }) => {
       const row = el('label');
       row.setAttribute('style', 'display:flex; gap:8px; align-items:center; border:1px solid #eee; padding:6px; border-radius:8px;');
 
@@ -309,83 +364,129 @@ async function fetchAll<T = any>(url: string, params: Record<string, any> = {}):
         if (cb.checked) selected.set(person.id, person);
         else selected.delete(person.id);
         renderSelection();
-        renderSearch(lastRendered.groups, lastRendered.persons);
+        renderSearch(lastRenderedItems); // <- aktualisiere ohne neu zu suchen
       });
 
-      let labelText = `${person.firstName} ${person.lastName} (ID: ${person.id}`;
-      if (groups.length) labelText += `, Gruppe: ${groups.join(', ')}`;
+      const groupNames = groups.map(gr => gr?.name).filter(Boolean) as string[];
+      let labelText = `${person.firstName ?? ''} ${person.lastName ?? ''} (ID: ${person.id}`;
+      if (groupNames.length) labelText += `, Gruppe: ${groupNames.join(', ')}`;
       labelText += ')';
+
       const label = el('span', { text: labelText });
 
       row.append(cb, label);
       results.append(row);
-    });
+    }
+  }
+}
+
+
+
+
+// Globale letzte Anzeige jetzt als Items
+let lastRenderedItems: SearchItem[] = [];
+
+const runSearch = debounce(async () => {
+  const qRaw = searchInput.value.trim();
+  const q = norm(qRaw);
+
+  if (!q) {
+    results.innerHTML = '';
+    lastRenderedItems = [];
+    return;
   }
 
-  // ---- Suche ----
-  const runSearch = debounce(async () => {
-    const qRaw = searchInput.value.trim();
-    const q = norm(qRaw);
+  // 1) Personentreffer nach Name (lokal)
+  const personMatches = persons.filter(
+    (u) => norm(u.firstName ?? '').startsWith(q) ||            // Prefix zuerst
+           norm(u.lastName ?? '').startsWith(q)  ||
+           norm(`${u.firstName ?? ''} ${u.lastName ?? ''}`).includes(q) ||
+           norm(`${u.lastName ?? ''} ${u.firstName ?? ''}`).includes(q)
+  );
 
-    if (!q) {
-      results.innerHTML = '';
-      lastRendered = { groups: [], persons: [] };
-      return;
-    }
+  // Index: PersonId -> PersonRow
+  const personRowsById = new Map<number, PersonRow>(
+    personMatches.map(p => [p.id, { person: p, groups: [] } as PersonRow])
+  );
 
-    // Personentreffer aus lokal **vollständiger** Liste
-    const personMatches = persons.filter((u) => norm(u.firstName).includes(q) || norm(u.lastName).includes(q));
-    const personRows: PersonRow[] = personMatches.map((p) => ({ person: p, groups: [] }));
+  // 2) Gruppentreffer
+  const matchingGroups = groups.filter((g) => norm(g.name ?? '').includes(q));
+  const matchedGroupIds = new Set(matchingGroups.map(g => g.id));
 
-    // Gruppentreffer (lokal aus vollständiger Liste)
-    const matchingGroups = groups.filter((g) => norm(g.name).includes(q));
+  // 3) Gruppen-Mitglieder parallel holen & GroupRows bauen
+  const groupRows: GroupRow[] = await Promise.all(
+    matchingGroups.map(async (g): Promise<GroupRow> => {
+      const members = await fetchGroupMembers(g.id); // nutzt deinen Cache
+      return { group: g, members };
+    })
+  );
 
-    const groupRows: GroupRow[] = [];
-    const fromGroups: PersonRow[] = [];
+  // 4) Personen aus Gruppen in personRowsById mergen (groups: Group[])
+  for (const { group, members } of groupRows) {
+    for (const mp of members) {
+      const person = personsById.get(mp.id) ?? mp;
 
-    for (const g of matchingGroups) {
-      const members = await fetchGroupMembers(g.id);
-      groupRows.push({ group: g, members });
-
-      for (const mp of members) {
-        const person = personsById.get(mp.id) ?? mp;
-        const existing = fromGroups.find((x) => x.person.id === person.id);
-        if (existing) {
-          if (!existing.groups.includes(g.name)) existing.groups.push(g.name);
-        } else {
-          fromGroups.push({ person, groups: [g.name] });
-        }
+      let row = personRowsById.get(person.id);
+      if (!row) {
+        row = { person, groups: [] };
+        personRowsById.set(person.id, row);
+      }
+      if (!row.groups.some(gr => gr.id === group.id)) {
+        row.groups.push(group);
       }
     }
+  }
 
-    // Zusammenführen & Deduplizieren der Personenzeilen
-    const combined = new Map<string, PersonRow>();
-    for (const e of [...personRows, ...fromGroups]) {
-      const prev = combined.get(e.person.id);
-      if (!prev) combined.set(e.person.id, { person: e.person, groups: [...new Set(e.groups)] });
-      else prev.groups = [...new Set([...prev.groups, ...e.groups])];
-    }
+  // 5) In Items umwandeln + Scores vergeben
+  const personItems: SearchItem[] = [...personRowsById.values()].map(row => ({
+    kind: 'person',
+    row,
+    score: scorePerson(row.person, row.groups, q, matchedGroupIds),
+  }));
 
-    renderSearch(groupRows, [...combined.values()]);
-  }, 250);
+  const groupItems: SearchItem[] = groupRows.map(row => ({
+    kind: 'group',
+    row,
+    score: scoreText(row.group.name, q),
+  }));
 
-  searchInput.addEventListener('input', runSearch);
+  // 6) Vereinigen & sortieren (höchster Score zuerst)
+  const items = [...personItems, ...groupItems]
+    .filter(i => i.score > 0) // wirklich passende Ergebnisse
+    .sort((a, b) =>
+      b.score - a.score ||
+      // bei Gleichstand: Personen vor Gruppen
+      (a.kind === b.kind ? 0 : a.kind === 'person' ? -1 : 1) ||
+      // weitere Tie-Breaker: kürzerer Name zuerst
+      (a.kind === 'person'
+        ? ((a.row.person.lastName ?? '').length + (a.row.person.firstName ?? '').length) -
+          ((b as any).row.person?.lastName ?? '').length - ((b as any).row.person?.firstName ?? '').length
+        : (a as any).row.group.name.length - (b as any).row.group.name.length)
+    );
 
-  // Export
-  exportBtn.addEventListener('click', () => {
-    const typeLabel = groupTypeSelect.options[groupTypeSelect.selectedIndex]?.text || '-';
-    const typeValue = groupTypeSelect.value || '';
+  lastRenderedItems = items;
+  renderSearch(lastRenderedItems);
+}, 250);
 
-    const cfgLines = [
-      '[Gruppen-Konfiguration]',
-      `Typ: ${typeLabel}${typeValue ? ` (ID: ${typeValue})` : ''}`,
-      `Name: ${groupNameInput.value || '-'}`,
-      `Chat aktiv: ${chatCheckbox.checked ? 'Ja' : 'Nein'}`,
-    ];
-    const personLines = [...selected.values()].map((p) => `${p.id}    ${p.firstName} ${p.lastName}`);
-    outputArea.value = cfgLines.join('\n') + '\n\n' + personLines.join('\n');
-  });
 
-  // Initiale Auswahl anzeigen
-  renderSelection();
+
+searchInput.addEventListener('input', runSearch);
+
+// Export
+exportBtn.addEventListener('click', () => {
+  const typeLabel = groupTypeSelect.options[groupTypeSelect.selectedIndex]?.text || '-';
+  const typeValue = groupTypeSelect.value || '';
+
+  const cfgLines = [
+    '[Gruppen-Konfiguration]',
+    `Typ: ${typeLabel}${typeValue ? ` (ID: ${typeValue})` : ''}`,
+    `Name: ${groupNameInput.value || '-'}`,
+    `Chat aktiv: ${chatCheckbox.checked ? 'Ja' : 'Nein'}`,
+  ];
+  const personLines = [...selected.values()].map((p) => `${p.id}    ${p.firstName} ${p.lastName}`);
+  outputArea.value = cfgLines.join('\n') + '\n\n' + personLines.join('\n');
+});
+
+// Initiale Auswahl anzeigen
+renderSelection();
 })();
