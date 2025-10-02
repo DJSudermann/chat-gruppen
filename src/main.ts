@@ -64,7 +64,9 @@ function norm(s: string) {
  
 
   // 2) Personen **vollständig** laden (offizielle Typen + getAllPages)
-  const persons = await churchtoolsClient.getAllPages('/persons')as Person[];
+  const persons = await churchtoolsClient.getAllPages<Person>(
+    '/persons?is_archived=false'
+  );
   const personsById = new Map<number, Person>(persons.map((p) => [p.id, p]));
 
   // 3) Gruppen  laden (ebenfalls via getAllPages)
@@ -179,10 +181,10 @@ function norm(s: string) {
   cfgGrid.append(typeWrap, mainUserRoleGeneratornWrap, otherUserRoleGeneratornWrap  , nameWrap, chatWrap);
   configCard.append(cfgTitle, cfgGrid);
 
-  const exportBtn = el('button', { text: 'IDs & Namen in Textfeld ausgeben' });
+  const exportBtn = el('button', { text: 'Gruppe erstellen' });
   exportBtn.setAttribute('style', [
     'padding:10px 14px',
-    'background:#2563eb',
+    'background:#155dfc',
     'color:white',
     'border:none',
     'border-radius:8px',
@@ -260,7 +262,7 @@ function renderSelection() {
     row.setAttribute('style', 'display:flex; justify-content:space-between; align-items:center; border:1px solid #ddd; border-radius:6px; padding:6px;');
     const span = el('span', { text: `${p.firstName} ${p.lastName} (ID: ${p.id})` });
     const removeBtn = el('button', { text: 'Entfernen' });
-    removeBtn.setAttribute('style', 'padding:4px 8px; background:#ef4444; color:white; border:none; border-radius:4px; cursor:pointer;');
+    removeBtn.setAttribute('style', 'padding:4px 8px; background:#fb2c36; color:white; border:none; border-radius:4px; cursor:pointer;');
     removeBtn.addEventListener('click', () => {
       selected.delete(p.id);
       renderSelection();
